@@ -1,6 +1,7 @@
 import pool from '../db/index.js';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -18,24 +19,28 @@ export const register = async (req, res) => {
   }
 
   try {
-    // If this phone was a guest before, remove from temp_users
-    await pool.query('DELETE FROM temp_users WHERE phone = $1', [phone]);
+    // Remove from temp_users if exists
+    await pool.query('DELETE FROM temp_users WHERE phone = ?', [phone]);
 
     const hashed = await bcrypt.hash(password, SALT_ROUNDS);
+    const id = crypto.randomUUID();
 
-    const result = await pool.query(
-      `INSERT INTO users (name, phone, password_hash, sex, blood_group, medical_conditions, allergies, location_home, location_current)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-       RETURNING id, name, phone, role, sex, blood_group, location_home, location_current`,
-      [name, phone, hashed, sex || null, blood_group || null, medical_conditions || null, allergies || null, location_home || null]
+    await pool.query(
+      `INSERT INTO users (id, name, phone, password_hash, sex, blood_group, medical_conditions, allergies, location_home, location_current)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, name, phone, hashed, sex || null, blood_group || null, medical_conditions || null, allergies || null, location_home || null, location_home || null]
     );
 
-    const user = result.rows[0];
-    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    const user = {
+      id, name, phone, role: 'user',
+      sex: sex || null, blood_group: blood_group || null,
+      location_home: location_home || null, location_current: location_home || null,
+    };
 
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
     return res.status(201).json({ user, token });
   } catch (err) {
-    if (err.code === '23505') {
+    if (err.message?.includes('UNIQUE constraint failed') || err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
       return res.status(409).json({ message: 'Phone number already registered' });
     }
     console.error('Register error:', err);
@@ -53,7 +58,7 @@ export const login = async (req, res) => {
 
   try {
     const result = await pool.query(
-      'SELECT id, name, phone, password_hash, role, sex, blood_group, location_home, location_current FROM users WHERE phone = $1',
+      'SELECT id, name, phone, password_hash, role, sex, blood_group, location_home, location_current FROM users WHERE phone = ?',
       [phone]
     );
 
@@ -69,8 +74,6 @@ export const login = async (req, res) => {
     }
 
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-
-    // Don't send password_hash to frontend
     const { password_hash, ...safeUser } = user;
     return res.json({ user: safeUser, token });
   } catch (err) {
@@ -89,18 +92,28 @@ export const guestOTP = async (req, res) => {
 
   try {
     // Check if already a registered user
-    const existing = await pool.query('SELECT id FROM users WHERE phone = $1', [phone]);
+    const existing = await pool.query('SELECT id FROM users WHERE phone = ?', [phone]);
     if (existing.rowCount > 0) {
       return res.status(409).json({ message: 'Phone already registered. Please sign in instead.' });
     }
 
-    // Insert or update temp_user
-    await pool.query(
-      `INSERT INTO temp_users (phone, location_current, otp_code)
-       VALUES ($1, $2, '123456')
-       ON CONFLICT (phone) DO UPDATE SET otp_code = '123456', otp_verified = FALSE, location_current = $2`,
-      [phone, location_current || null]
-    );
+    // Check if temp_user already exists
+    const existingTemp = await pool.query('SELECT id FROM temp_users WHERE phone = ?', [phone]);
+
+    if (existingTemp.rowCount > 0) {
+      // Update existing
+      await pool.query(
+        `UPDATE temp_users SET otp_code = '123456', otp_verified = 0, location_current = ? WHERE phone = ?`,
+        [location_current || null, phone]
+      );
+    } else {
+      // Insert new
+      const id = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO temp_users (id, phone, location_current, otp_code) VALUES (?, ?, ?, '123456')`,
+        [id, phone, location_current || null]
+      );
+    }
 
     return res.json({ message: 'OTP sent (dev: 123456)' });
   } catch (err) {
@@ -119,7 +132,7 @@ export const verifyOTP = async (req, res) => {
 
   try {
     const result = await pool.query(
-      'SELECT * FROM temp_users WHERE phone = $1 AND otp_code = $2',
+      'SELECT id, phone, location_current FROM temp_users WHERE phone = ? AND otp_code = ?',
       [phone, otp]
     );
 
@@ -127,7 +140,7 @@ export const verifyOTP = async (req, res) => {
       return res.status(401).json({ message: 'Invalid OTP' });
     }
 
-    await pool.query('UPDATE temp_users SET otp_verified = TRUE WHERE phone = $1', [phone]);
+    await pool.query('UPDATE temp_users SET otp_verified = 1 WHERE phone = ?', [phone]);
 
     const tempUser = result.rows[0];
     const token = jwt.sign(
@@ -158,9 +171,9 @@ export const updateLocation = async (req, res) => {
 
   try {
     if (userRole === 'guest') {
-      await pool.query('UPDATE temp_users SET location_current = $1 WHERE id = $2', [location_current, userId]);
+      await pool.query('UPDATE temp_users SET location_current = ? WHERE id = ?', [location_current, userId]);
     } else {
-      await pool.query('UPDATE users SET location_current = $1 WHERE id = $2', [location_current, userId]);
+      await pool.query('UPDATE users SET location_current = ? WHERE id = ?', [location_current, userId]);
     }
 
     return res.json({ message: 'Location updated', location_current });
