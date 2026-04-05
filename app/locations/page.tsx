@@ -27,12 +27,6 @@ const SPECIALTIES = [
   'Gynecology', 'Dental', 'Psychiatry', 'Emergency Medicine',
 ];
 
-const DEMO_HOSPITALS = [
-  { id: 'aaaa1111-1111-1111-1111-111111111111', name: 'City General Hospital', address: '123 Main Street, New Delhi', distance: '1.2 km' },
-  { id: 'bbbb2222-2222-2222-2222-222222222222', name: 'Metro Heart Institute', address: '456 Health Avenue, Mumbai', distance: '3.5 km' },
-  { id: 'cccc3333-3333-3333-3333-333333333333', name: 'Apollo Medical Center', address: '789 Care Boulevard, Bangalore', distance: '5.1 km' },
-];
-
 export default function LocationsPage() {
   const router = useRouter();
   const { user, isAuthenticated, sendGuestOTP, verifyOTP } = useAuth();
@@ -45,11 +39,36 @@ export default function LocationsPage() {
   const [phone, setPhone] = useState('');
   const [guestLocation, setGuestLocation] = useState('');
   const [otp, setOtp] = useState('');
+  const [gpsData, setGpsData] = useState<{ lat: number, lon: number } | null>(null);
 
   // Booking flow
   const [category, setCategory] = useState('');
   const [specialty, setSpecialty] = useState('');
-  const [selectedHospital, setSelectedHospital] = useState<typeof DEMO_HOSPITALS[0] | null>(null);
+  const [nearbyHospitals, setNearbyHospitals] = useState<any[]>([]);
+  const [selectedHospital, setSelectedHospital] = useState<any | null>(null);
+  const [isFetchingHospitals, setIsFetchingHospitals] = useState(false);
+
+  const handleDetectLocation = () => {
+    if ("geolocation" in navigator) {
+      setIsLoading(true);
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setGpsData({
+            lat: position.coords.latitude,
+            lon: position.coords.longitude
+          });
+          setGuestLocation("GPS Location Detected");
+          setIsLoading(false);
+        },
+        (error) => {
+          setError("Location access denied or failed.");
+          setIsLoading(false);
+        }
+      );
+    } else {
+      setError("Geolocation is not supported by your browser");
+    }
+  };
 
   const handleSendOTP = async () => {
     setError(null);
@@ -81,6 +100,35 @@ export default function LocationsPage() {
     // In production, this would call the token creation API
     router.push('/dashboard');
   };
+
+  const fetchNearbyHospitals = async () => {
+    setIsFetchingHospitals(true);
+    setError(null);
+    try {
+      let url = 'http://localhost:4000/hospitals/nearby?';
+      if (gpsData) {
+        url += `lat=${gpsData.lat}&lon=${gpsData.lon}`;
+      } else {
+        const queryLoc = user?.location_current || guestLocation;
+        if (!queryLoc) throw new Error("Location not provided");
+        url += `location=${encodeURIComponent(queryLoc)}`;
+      }
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to fetch hospitals');
+      setNearbyHospitals(data.hospitals || []);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsFetchingHospitals(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (step === 'hospital' && nearbyHospitals.length === 0) {
+      fetchNearbyHospitals();
+    }
+  }, [step]);
 
   const stepNumber = {
     phone: 1, otp: 2, category: 3, specialty: 4, location: 5, hospital: 6, confirm: 7,
@@ -130,9 +178,14 @@ export default function LocationsPage() {
               </div>
               <div className="space-y-2">
                 <Label>Your Location</Label>
-                <Input placeholder="New Delhi" value={guestLocation} onChange={(e) => setGuestLocation(e.target.value)} />
+                <div className="flex gap-2">
+                  <Input placeholder="New Delhi" value={guestLocation} onChange={(e) => { setGuestLocation(e.target.value); setGpsData(null); }} readOnly={!!gpsData} className="flex-1" />
+                  <Button variant="outline" onClick={handleDetectLocation} disabled={isLoading} className="shrink-0" title="Detect GPS location">
+                    <MapPin className="w-4 h-4 text-blue-600" />
+                  </Button>
+                </div>
               </div>
-              <Button onClick={handleSendOTP} disabled={!phone || isLoading} className="w-full gap-2">
+              <Button onClick={handleSendOTP} disabled={!phone || (!guestLocation && !gpsData) || isLoading} className="w-full gap-2">
                 {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
                 Send OTP
               </Button>
@@ -214,27 +267,38 @@ export default function LocationsPage() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2"><Building2 className="w-5 h-5" /> Select Hospital</CardTitle>
-              <CardDescription>Nearby hospitals based on your location ({user?.location_current || guestLocation || 'Unknown'}).</CardDescription>
+              <CardDescription>Nearby hospitals within 50km ({user?.location_current || guestLocation || 'Unknown'}).</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {DEMO_HOSPITALS.map((h) => (
-                <button
-                  key={h.id}
-                  className={`w-full p-4 rounded-lg border text-left transition-all ${selectedHospital?.id === h.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 ring-2 ring-blue-500/20' : 'border-border hover:bg-muted/50'}`}
-                  onClick={() => { setSelectedHospital(h); setStep('confirm'); }}
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <div className="font-semibold">{h.name}</div>
-                      <div className="text-sm text-muted-foreground flex items-center gap-1 mt-1">
-                        <MapPin className="w-3.5 h-3.5" /> {h.address}
+              {isFetchingHospitals ? (
+                <div className="py-8 text-center text-muted-foreground flex flex-col items-center justify-center gap-3">
+                  <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                  <p>Searching for nearby hospitals via OpenStreetMap...</p>
+                </div>
+              ) : nearbyHospitals.length > 0 ? (
+                nearbyHospitals.map((h) => (
+                  <button
+                    key={h.id}
+                    className={`w-full p-4 rounded-lg border text-left transition-all ${selectedHospital?.id === h.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-950 ring-2 ring-blue-500/20' : 'border-border hover:bg-muted/50'}`}
+                    onClick={() => { setSelectedHospital(h); setStep('confirm'); }}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="font-semibold">{h.name}</div>
+                        <div className="text-sm text-muted-foreground flex items-center gap-1 mt-1">
+                          <MapPin className="w-3.5 h-3.5" /> {h.address}
+                        </div>
                       </div>
+                      <Badge variant="outline" className="shrink-0 ml-2">{h.distance}</Badge>
                     </div>
-                    <Badge variant="outline">{h.distance}</Badge>
-                  </div>
-                </button>
-              ))}
-              <Button variant="outline" onClick={() => setStep('specialty')} className="gap-1"><ArrowLeft className="w-4 h-4" /> Back</Button>
+                  </button>
+                ))
+              ) : (
+                <div className="py-8 text-center text-muted-foreground">
+                  No hospitals found within 50km of your location.
+                </div>
+              )}
+              <Button variant="outline" onClick={() => setStep('specialty')} className="gap-1 mt-2 "><ArrowLeft className="w-4 h-4" /> Back</Button>
             </CardContent>
           </Card>
         )}
@@ -263,6 +327,10 @@ export default function LocationsPage() {
                 <div className="flex justify-between">
                   <span className="text-sm text-muted-foreground">Address</span>
                   <span className="font-medium text-right text-sm">{selectedHospital?.address}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-muted-foreground">Distance</span>
+                  <span className="font-medium">{selectedHospital?.distance}</span>
                 </div>
               </div>
 
