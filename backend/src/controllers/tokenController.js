@@ -47,7 +47,7 @@ export const callNextHandler = async (req, res) => {
 
   try {
     const counterRes = await pool.query(
-      'SELECT id, location_id FROM counters WHERE id = $1',
+      'SELECT id, location_id FROM counters WHERE id = ?',
       [counterId]
     );
 
