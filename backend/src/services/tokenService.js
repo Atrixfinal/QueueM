@@ -1,7 +1,9 @@
-import pool from '../db/index.js';
+import pool, { db } from '../db/index.js';
+import crypto from 'crypto';
 
 /**
- * Create a queue token with sequential numbering via transaction.
+ * Create a queue token with sequential numbering (SQLite version).
+ * Uses a transaction for atomicity.
  */
 export async function createToken({
   userId = null,
@@ -13,143 +15,106 @@ export async function createToken({
   specialty = null,
   hospitalId = null,
 }) {
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
+  // Use SQLite transaction for atomicity
+  const txn = db.transaction(() => {
     // Ensure token_counters row exists
-    await client.query(
-      `INSERT INTO token_counters (location_id, service_id, last_number)
-       VALUES ($1, $2, 0) ON CONFLICT (location_id, service_id) DO NOTHING`,
-      [locationId, serviceId]
-    );
+    db.prepare(
+      `INSERT OR IGNORE INTO token_counters (id, location_id, service_id, last_number)
+       VALUES (?, ?, ?, 0)`
+    ).run(crypto.randomUUID(), locationId, serviceId);
 
-    // Lock the counter row for update
-    const rc = await client.query(
-      `SELECT last_number FROM token_counters
-       WHERE location_id = $1 AND service_id = $2 FOR UPDATE`,
-      [locationId, serviceId]
-    );
+    // Get and increment counter
+    const counter = db.prepare(
+      `SELECT last_number FROM token_counters WHERE location_id = ? AND service_id = ?`
+    ).get(locationId, serviceId);
 
-    let last = 0;
-    if (rc.rowCount) last = Number(rc.rows[0].last_number);
-    const nextNumber = last + 1;
+    const nextNumber = (counter?.last_number || 0) + 1;
 
-    await client.query(
-      `UPDATE token_counters SET last_number = $1, updated_at = now()
-       WHERE location_id = $2 AND service_id = $3`,
-      [nextNumber, locationId, serviceId]
-    );
+    db.prepare(
+      `UPDATE token_counters SET last_number = ?, updated_at = datetime('now')
+       WHERE location_id = ? AND service_id = ?`
+    ).run(nextNumber, locationId, serviceId);
 
-    const insert = await client.query(
-      `INSERT INTO tokens (user_id, temp_user_id, location_id, service_id, hospital_id, token_number, priority, category, specialty, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'waiting', now(), now())
-       RETURNING *`,
-      [userId, tempUserId, locationId, serviceId, hospitalId, nextNumber, priority, category, specialty]
-    );
+    // Insert the token
+    const tokenId = crypto.randomUUID();
+    db.prepare(
+      `INSERT INTO tokens (id, user_id, temp_user_id, location_id, service_id, hospital_id, token_number, priority, category, specialty, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', datetime('now'), datetime('now'))`
+    ).run(tokenId, userId, tempUserId, locationId, serviceId, hospitalId, nextNumber, priority, category, specialty);
 
-    // Compute estimated wait time
-    const waitingRes = await client.query(
-      `SELECT COUNT(*)::int as waiting_count FROM tokens
-       WHERE location_id = $1 AND service_id = $2 AND status = 'waiting'`,
-      [locationId, serviceId]
-    );
-    const waitingCount = waitingRes.rows[0].waiting_count;
+    // Count waiting tokens
+    const waitingRow = db.prepare(
+      `SELECT COUNT(*) as waiting_count FROM tokens
+       WHERE location_id = ? AND service_id = ? AND status = 'waiting'`
+    ).get(locationId, serviceId);
+    const waitingCount = waitingRow.waiting_count;
 
-    const avgRes = await client.query(
-      'SELECT avg_service_time_seconds FROM services WHERE id = $1',
-      [serviceId]
-    );
-    const avgService = avgRes.rowCount ? Number(avgRes.rows[0].avg_service_time_seconds || 300) : 300;
+    // Get avg service time
+    const serviceRow = db.prepare(
+      'SELECT avg_service_time_seconds FROM services WHERE id = ?'
+    ).get(serviceId);
+    const avgService = serviceRow ? (serviceRow.avg_service_time_seconds || 300) : 300;
 
-    const countersRes = await client.query(
-      `SELECT COUNT(*)::int as active FROM counters
-       WHERE location_id = $1 AND status = 'open'`,
-      [locationId]
-    );
-    const activeCounters = Math.max(1, countersRes.rows[0].active || 1);
+    // Count active counters
+    const counterRow = db.prepare(
+      `SELECT COUNT(*) as active FROM counters WHERE location_id = ? AND status = 'open'`
+    ).get(locationId);
+    const activeCounters = Math.max(1, counterRow?.active || 1);
 
     const estimated = Math.ceil((waitingCount * avgService) / activeCounters);
 
-    await client.query(
-      'UPDATE tokens SET estimated_wait_seconds = $1 WHERE id = $2',
-      [estimated, insert.rows[0].id]
-    );
+    // Update estimated wait time
+    db.prepare(
+      'UPDATE tokens SET estimated_wait_seconds = ? WHERE id = ?'
+    ).run(estimated, tokenId);
 
-    await client.query('COMMIT');
+    // Return the token
+    const token = db.prepare('SELECT * FROM tokens WHERE id = ?').get(tokenId);
 
-    return { token: { ...insert.rows[0], estimated_wait_seconds: estimated }, estimated_wait_seconds: estimated };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+    return { token: { ...token, estimated_wait_seconds: estimated }, estimated_wait_seconds: estimated };
+  });
+
+  return txn();
 }
 
 /**
- * Call next token for a counter using FOR UPDATE SKIP LOCKED.
+ * Call next token for a counter.
  */
 export async function callNextToken({ counterId, locationId, serviceId }) {
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
+  const txn = db.transaction(() => {
     // Verify counter is open
-    const counterRes = await client.query(
-      'SELECT id, status FROM counters WHERE id = $1 AND location_id = $2 FOR UPDATE',
-      [counterId, locationId]
-    );
+    const counter = db.prepare(
+      'SELECT id, status FROM counters WHERE id = ? AND location_id = ?'
+    ).get(counterId, locationId);
 
-    if (counterRes.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return { error: 'Counter not found' };
-    }
+    if (!counter) return { error: 'Counter not found' };
+    if (counter.status !== 'open') return { error: 'Counter is not open' };
 
-    if (counterRes.rows[0].status !== 'open') {
-      await client.query('ROLLBACK');
-      return { error: 'Counter is not open' };
-    }
-
-    // Select next token: high priority first, then by token_number
-    const nextRes = await client.query(
+    // Select next waiting token (high priority first, then by token_number)
+    const nextToken = db.prepare(
       `SELECT id FROM tokens
-       WHERE location_id = $1 AND service_id = $2 AND status = 'waiting'
-       ORDER BY (priority = 'high') DESC, token_number ASC
-       FOR UPDATE SKIP LOCKED
-       LIMIT 1`,
-      [locationId, serviceId]
-    );
+       WHERE location_id = ? AND service_id = ? AND status = 'waiting'
+       ORDER BY (CASE WHEN priority = 'high' THEN 0 ELSE 1 END), token_number ASC
+       LIMIT 1`
+    ).get(locationId, serviceId);
 
-    if (nextRes.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return { token: null };
-    }
+    if (!nextToken) return { token: null };
 
-    const tokenId = nextRes.rows[0].id;
+    // Update token status
+    db.prepare(
+      `UPDATE tokens SET status = 'serving', assigned_counter_id = ?, updated_at = datetime('now')
+       WHERE id = ?`
+    ).run(counterId, nextToken.id);
 
-    await client.query(
-      `UPDATE tokens SET status = 'serving', assigned_counter_id = $1, updated_at = now()
-       WHERE id = $2`,
-      [counterId, tokenId]
-    );
+    // Update counter
+    db.prepare(
+      'UPDATE counters SET current_token_id = ? WHERE id = ?'
+    ).run(nextToken.id, counterId);
 
-    await client.query(
-      'UPDATE counters SET current_token_id = $1 WHERE id = $2',
-      [tokenId, counterId]
-    );
+    const token = db.prepare('SELECT * FROM tokens WHERE id = ?').get(nextToken.id);
 
-    const tokenRow = await client.query('SELECT * FROM tokens WHERE id = $1', [tokenId]);
+    return { token };
+  });
 
-    await client.query('COMMIT');
-
-    return { token: tokenRow.rows[0] };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  return txn();
 }
