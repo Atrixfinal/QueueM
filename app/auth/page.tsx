@@ -40,7 +40,7 @@ export default function AuthPage() {
     setIsLoading(true);
     try {
       await login({ phone: loginPhone, password: loginPassword });
-      router.push('/');
+      router.push('/dashboard');
     } catch (err: any) {
       setError(err.response?.data?.message || 'Login failed');
     } finally {
@@ -63,7 +63,7 @@ export default function AuthPage() {
         allergies: regAllergies || undefined,
         location_home: regLocation || undefined,
       });
-      router.push('/');
+      router.push('/dashboard');
     } catch (err: any) {
       setError(err.response?.data?.message || 'Registration failed');
     } finally {
