@@ -267,7 +267,7 @@ export default function LocationsPage() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2"><Building2 className="w-5 h-5" /> Select Hospital</CardTitle>
-              <CardDescription>Nearby hospitals within 50km ({user?.location_current || guestLocation || 'Unknown'}).</CardDescription>
+              <CardDescription>Nearby hospitals within 5km ({user?.location_current || guestLocation || 'Unknown'}).</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {isFetchingHospitals ? (
@@ -295,7 +295,7 @@ export default function LocationsPage() {
                 ))
               ) : (
                 <div className="py-8 text-center text-muted-foreground">
-                  No hospitals found within 50km of your location.
+                  No hospitals found within 5km of your location.
                 </div>
               )}
               <Button variant="outline" onClick={() => setStep('specialty')} className="gap-1 mt-2 "><ArrowLeft className="w-4 h-4" /> Back</Button>
