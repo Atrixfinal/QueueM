@@ -80,12 +80,6 @@ npm start
 
 ---
 
-## 📸 Screenshots
-
-*(Add screenshots here)*
-
----
-
 ## 🔮 Future Improvements
 
 * 📱 Mobile App Integration
