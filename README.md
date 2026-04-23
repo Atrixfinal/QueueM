@@ -43,8 +43,8 @@ project-root/
 ### 1. Clone the repository
 
 ```
-git clone https://github.com/your-username/your-repo-name.git
-cd your-repo-name
+git clone https://github.com/Atrixfinal/QueueM.git
+cd queuem
 ```
 
 ### 2. Install dependencies
